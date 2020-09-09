@@ -1,12 +1,11 @@
 package jadx.core.xmlgen;
 
-import jadx.core.utils.exceptions.JadxRuntimeException;
-
-import javax.xml.parsers.DocumentBuilder;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+
+import javax.xml.parsers.DocumentBuilder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +13,8 @@ import org.w3c.dom.Document;
 import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+
+import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class ManifestAttributes {
 	private static final Logger LOG = LoggerFactory.getLogger(ManifestAttributes.class);
@@ -43,13 +44,30 @@ public class ManifestAttributes {
 
 		@Override
 		public String toString() {
-			return "[" + type + ", " + values + "]";
+			return "[" + type + ", " + values + ']';
 		}
 	}
 
 	private final Map<String, MAttr> attrMap = new HashMap<>();
 
-	public void parseAll() {
+	private static ManifestAttributes instance;
+
+	public static ManifestAttributes getInstance() {
+		if (instance == null) {
+			try {
+				instance = new ManifestAttributes();
+			} catch (Exception e) {
+				LOG.error("Failed to create ManifestAttributes", e);
+			}
+		}
+		return instance;
+	}
+
+	private ManifestAttributes() {
+		parseAll();
+	}
+
+	private void parseAll() {
 		parse(loadXML(ATTR_XML));
 		parse(loadXML(MANIFEST_ATTR_XML));
 		LOG.debug("Loaded android attributes count: {}", attrMap.size());
@@ -151,14 +169,14 @@ public class ManifestAttributes {
 			return null;
 		}
 		if (attr.getType() == MAttrType.ENUM) {
-			String name = attr.getValues().get(value);
-			if (name != null) {
-				return name;
-			}
+			return attr.getValues().get(value);
 		} else if (attr.getType() == MAttrType.FLAG) {
 			StringBuilder sb = new StringBuilder();
 			for (Map.Entry<Long, String> entry : attr.getValues().entrySet()) {
-				if ((value & entry.getKey()) != 0) {
+				if (value == entry.getKey()) {
+					sb = new StringBuilder(entry.getValue() + '|');
+					break;
+				} else if ((value & entry.getKey()) == entry.getKey()) {
 					sb.append(entry.getValue()).append('|');
 				}
 			}
@@ -166,6 +184,6 @@ public class ManifestAttributes {
 				return sb.deleteCharAt(sb.length() - 1).toString();
 			}
 		}
-		return "UNKNOWN_DATA_0x" + Long.toHexString(value);
+		return null;
 	}
 }

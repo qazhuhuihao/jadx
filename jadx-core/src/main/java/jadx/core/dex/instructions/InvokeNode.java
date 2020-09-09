@@ -1,42 +1,37 @@
 package jadx.core.dex.instructions;
 
+import org.jetbrains.annotations.Nullable;
+
+import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.InsnNode;
-import jadx.core.utils.InsnUtils;
-import jadx.core.utils.Utils;
 
-import com.android.dx.io.instructions.DecodedInstruction;
-
-public class InvokeNode extends InsnNode {
+public final class InvokeNode extends BaseInvokeNode {
 
 	private final InvokeType type;
 	private final MethodInfo mth;
 
-	public InvokeNode(MethodInfo mth, DecodedInstruction insn, InvokeType type, boolean isRange, int resReg) {
-		super(InsnType.INVOKE, mth.getArgsCount() + (type != InvokeType.STATIC ? 1 : 0));
+	public InvokeNode(MethodInfo mth, InsnData insn, InvokeType type, boolean isRange) {
+		super(InsnType.INVOKE, mth.getArgsCount() + (type == InvokeType.STATIC ? 0 : 1));
 		this.mth = mth;
 		this.type = type;
 
-		if (resReg >= 0) {
-			setResult(InsnArg.reg(resReg, mth.getReturnType()));
-		}
-
-		int k = isRange ? insn.getA() : 0;
+		int k = isRange ? insn.getReg(0) : 0;
 		if (type != InvokeType.STATIC) {
-			int r = isRange ? k : InsnUtils.getArg(insn, k);
+			int r = isRange ? k : insn.getReg(k);
 			addReg(r, mth.getDeclClass().getType());
 			k++;
 		}
 
 		for (ArgType arg : mth.getArgumentsTypes()) {
-			addReg(isRange ? k : InsnUtils.getArg(insn, k), arg);
+			addReg(isRange ? k : insn.getReg(k), arg);
 			k += arg.getRegCount();
 		}
 	}
 
-	private InvokeNode(MethodInfo mth, InvokeType invokeType, int argsCount) {
+	public InvokeNode(MethodInfo mth, InvokeType invokeType, int argsCount) {
 		super(InsnType.INVOKE, argsCount);
 		this.mth = mth;
 		this.type = invokeType;
@@ -46,8 +41,27 @@ public class InvokeNode extends InsnNode {
 		return type;
 	}
 
+	@Override
 	public MethodInfo getCallMth() {
 		return mth;
+	}
+
+	@Override
+	@Nullable
+	public InsnArg getInstanceArg() {
+		if (type != InvokeType.STATIC && getArgsCount() > 0) {
+			return getArg(0);
+		}
+		return null;
+	}
+
+	@Override
+	public boolean isStaticCall() {
+		return type == InvokeType.STATIC;
+	}
+
+	public int getFirstArgOffset() {
+		return type == InvokeType.STATIC ? 0 : 1;
 	}
 
 	@Override
@@ -69,11 +83,6 @@ public class InvokeNode extends InsnNode {
 
 	@Override
 	public String toString() {
-		return InsnUtils.formatOffset(offset) + ": "
-				+ InsnUtils.insnTypeToString(insnType)
-				+ (getResult() == null ? "" : getResult() + " = ")
-				+ Utils.listToString(getArguments())
-				+ " " + mth
-				+ " type: " + type;
+		return super.toString() + " type: " + type + " call: " + mth;
 	}
 }

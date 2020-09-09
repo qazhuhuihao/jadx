@@ -1,10 +1,31 @@
 package jadx.core.dex.nodes;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import jadx.api.ICodeCache;
+import jadx.api.ICodeInfo;
+import jadx.api.plugins.input.data.IClassData;
+import jadx.api.plugins.input.data.annotations.EncodedValue;
+import jadx.api.plugins.input.data.annotations.IAnnotation;
 import jadx.core.Consts;
-import jadx.core.codegen.CodeWriter;
-import jadx.core.dex.attributes.annotations.Annotation;
-import jadx.core.dex.attributes.nodes.JadxErrorAttr;
-import jadx.core.dex.attributes.nodes.LineAttrNode;
+import jadx.core.ProcessClass;
+import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.FieldInitAttr;
+import jadx.core.dex.attributes.annotations.AnnotationsList;
+import jadx.core.dex.attributes.nodes.NotificationAttrNode;
 import jadx.core.dex.attributes.nodes.SourceFileAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.AccessInfo.AFType;
@@ -13,203 +34,148 @@ import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.LiteralArg;
-import jadx.core.dex.nodes.parser.AnnotationsParser;
-import jadx.core.dex.nodes.parser.FieldInitAttr;
-import jadx.core.dex.nodes.parser.SignatureParser;
-import jadx.core.dex.nodes.parser.StaticValuesParser;
-import jadx.core.utils.exceptions.DecodeException;
+import jadx.core.dex.visitors.ProcessAnonymous;
+import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import static jadx.core.dex.nodes.ProcessState.LOADED;
+import static jadx.core.dex.nodes.ProcessState.NOT_LOADED;
 
-import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.TestOnly;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.android.dex.ClassData;
-import com.android.dex.ClassData.Field;
-import com.android.dex.ClassData.Method;
-import com.android.dex.ClassDef;
-import com.android.dex.Dex;
-import com.android.dx.rop.code.AccessFlags;
-
-public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
+public class ClassNode extends NotificationAttrNode implements ILoadable, ICodeNode, Comparable<ClassNode> {
 	private static final Logger LOG = LoggerFactory.getLogger(ClassNode.class);
 
-	private final DexNode dex;
+	private final RootNode root;
+	private final IClassData clsData;
+
 	private final ClassInfo clsInfo;
-	private final AccessInfo accessFlags;
+	private AccessInfo accessFlags;
 	private ArgType superClass;
 	private List<ArgType> interfaces;
-	private Map<ArgType, List<ArgType>> genericMap;
+	private List<ArgType> generics = Collections.emptyList();
 
-	private final List<MethodNode> methods;
-	private final List<FieldNode> fields;
+	private List<MethodNode> methods;
+	private List<FieldNode> fields;
 	private List<ClassNode> innerClasses = Collections.emptyList();
 
-	// store decompiled code
-	private CodeWriter code;
+	private List<ClassNode> inlinedClasses = Collections.emptyList();
+
+	// store smali
+	private String smali;
 	// store parent for inner classes or 'this' otherwise
 	private ClassNode parentClass;
 
-	private ProcessState state = ProcessState.NOT_LOADED;
-	private final Set<ClassNode> dependencies = new HashSet<>();
+	private volatile ProcessState state = ProcessState.NOT_LOADED;
+	private LoadStage loadStage = LoadStage.NONE;
+
+	/** Top level classes used in this class (only for top level classes, empty for inners) */
+	private List<ClassNode> dependencies = Collections.emptyList();
+	/** Classes which uses this class */
+	private List<ClassNode> useIn = Collections.emptyList();
+	/** Methods which uses this class (by instructions only, definition is excluded) */
+	private List<MethodNode> useInMth = Collections.emptyList();
 
 	// cache maps
 	private Map<MethodInfo, MethodNode> mthInfoMap = Collections.emptyMap();
 
-	public ClassNode(DexNode dex, ClassDef cls) throws DecodeException {
-		this.dex = dex;
-		this.clsInfo = ClassInfo.fromDex(dex, cls.getTypeIndex());
+	public ClassNode(RootNode root, IClassData cls) {
+		this.root = root;
+		this.clsInfo = ClassInfo.fromType(root, ArgType.object(cls.getType()));
+		this.clsData = cls.copy();
+		initialLoad(clsData);
+	}
+
+	private void initialLoad(IClassData cls) {
 		try {
-			if (cls.getSupertypeIndex() == DexNode.NO_INDEX) {
+			String superType = cls.getSuperType();
+			if (superType == null) {
+				// only java.lang.Object don't have super class
+				if (!clsInfo.getType().getObject().equals(Consts.CLASS_OBJECT)) {
+					throw new JadxRuntimeException("No super class in " + clsInfo.getType());
+				}
 				this.superClass = null;
 			} else {
-				this.superClass = dex.getType(cls.getSupertypeIndex());
+				this.superClass = ArgType.object(superType);
 			}
-			this.interfaces = new ArrayList<>(cls.getInterfaces().length);
-			for (short interfaceIdx : cls.getInterfaces()) {
-				this.interfaces.add(dex.getType(interfaceIdx));
-			}
-			if (cls.getClassDataOffset() != 0) {
-				ClassData clsData = dex.readClassData(cls);
-				int mthsCount = clsData.getDirectMethods().length + clsData.getVirtualMethods().length;
-				int fieldsCount = clsData.getStaticFields().length + clsData.getInstanceFields().length;
+			this.interfaces = Utils.collectionMap(cls.getInterfacesTypes(), ArgType::object);
 
-				methods = new ArrayList<>(mthsCount);
-				fields = new ArrayList<>(fieldsCount);
+			methods = new ArrayList<>();
+			fields = new ArrayList<>();
+			cls.visitFieldsAndMethods(
+					fld -> fields.add(FieldNode.build(this, fld)),
+					mth -> methods.add(MethodNode.build(this, mth)));
 
-				for (Method mth : clsData.getDirectMethods()) {
-					methods.add(new MethodNode(this, mth, false));
-				}
-				for (Method mth : clsData.getVirtualMethods()) {
-					methods.add(new MethodNode(this, mth, true));
-				}
+			AnnotationsList.attach(this, cls.getAnnotations());
+			loadStaticValues(cls, fields);
+			initAccessFlags(cls);
 
-				for (Field f : clsData.getStaticFields()) {
-					fields.add(new FieldNode(this, f));
-				}
-				loadStaticValues(cls, fields);
-				for (Field f : clsData.getInstanceFields()) {
-					fields.add(new FieldNode(this, f));
-				}
-			} else {
-				methods = Collections.emptyList();
-				fields = Collections.emptyList();
-			}
-
-			loadAnnotations(cls);
-
-			parseClassSignature();
-			setFieldsTypesFromSignature();
-
-			int sfIdx = cls.getSourceFileIndex();
-			if (sfIdx != DexNode.NO_INDEX) {
-				String fileName = dex.getString(sfIdx);
-				addSourceFilenameAttr(fileName);
-			}
-
-			// restore original access flags from dalvik annotation if present
-			int accFlagsValue;
-			Annotation a = getAnnotation(Consts.DALVIK_INNER_CLASS);
-			if (a != null) {
-				accFlagsValue = (Integer) a.getValues().get("accessFlags");
-			} else {
-				accFlagsValue = cls.getAccessFlags();
-			}
-			this.accessFlags = new AccessInfo(accFlagsValue, AFType.CLASS);
-
+			addSourceFilenameAttr(cls.getSourceFile());
 			buildCache();
 		} catch (Exception e) {
-			throw new DecodeException("Error decode class: " + clsInfo, e);
+			throw new JadxRuntimeException("Error decode class: " + clsInfo, e);
 		}
 	}
 
-	// empty synthetic class
-	public ClassNode(DexNode dex, ClassInfo clsInfo) {
-		this.dex = dex;
-		this.clsInfo = clsInfo;
-		this.interfaces = Collections.emptyList();
-		this.methods = Collections.emptyList();
-		this.fields = Collections.emptyList();
-		this.accessFlags = new AccessInfo(AccessFlags.ACC_PUBLIC | AccessFlags.ACC_SYNTHETIC, AFType.CLASS);
+	public void updateGenericClsData(ArgType superClass, List<ArgType> interfaces, List<ArgType> generics) {
+		this.superClass = superClass;
+		this.interfaces = interfaces;
+		this.generics = generics;
+	}
+
+	/**
+	 * Restore original access flags from Dalvik annotation if present
+	 */
+	private void initAccessFlags(IClassData cls) {
+		int accFlagsValue;
+		IAnnotation a = getAnnotation(Consts.DALVIK_INNER_CLASS);
+		if (a != null) {
+			accFlagsValue = (Integer) a.getValues().get("accessFlags").getValue();
+		} else {
+			accFlagsValue = cls.getAccessFlags();
+		}
+		this.accessFlags = new AccessInfo(accFlagsValue, AFType.CLASS);
+	}
+
+	public static ClassNode addSyntheticClass(RootNode root, String name, int accessFlags) {
+		ClassNode cls = new ClassNode(root, name, accessFlags);
+		cls.add(AFlag.SYNTHETIC);
+		cls.setState(ProcessState.PROCESS_COMPLETE);
+		root.addClassNode(cls);
+		return cls;
+	}
+
+	// Create empty class
+	private ClassNode(RootNode root, String name, int accessFlags) {
+		this.root = root;
+		this.clsData = null;
+		this.clsInfo = ClassInfo.fromName(root, name);
+		this.interfaces = new ArrayList<>();
+		this.methods = new ArrayList<>();
+		this.fields = new ArrayList<>();
+		this.accessFlags = new AccessInfo(accessFlags, AFType.CLASS);
 		this.parentClass = this;
 	}
 
-	private void loadAnnotations(ClassDef cls) {
-		int offset = cls.getAnnotationsOffset();
-		if (offset != 0) {
-			try {
-				new AnnotationsParser(this).parse(offset);
-			} catch (Exception e) {
-				LOG.error("Error parsing annotations in {}", this, e);
-			}
+	private void loadStaticValues(IClassData cls, List<FieldNode> fields) {
+		if (fields.isEmpty()) {
+			return;
 		}
-	}
-
-	private void loadStaticValues(ClassDef cls, List<FieldNode> staticFields) throws DecodeException {
+		List<FieldNode> staticFields = fields.stream().filter(FieldNode::isStatic).collect(Collectors.toList());
 		for (FieldNode f : staticFields) {
 			if (f.getAccessFlags().isFinal()) {
+				// incorrect initialization will be removed if assign found in constructor
 				f.addAttr(FieldInitAttr.NULL_VALUE);
 			}
 		}
-		int offset = cls.getStaticValuesOffset();
-		if (offset == 0) {
+		List<EncodedValue> values = cls.getStaticFieldInitValues();
+		int count = values.size();
+		if (count == 0 || count > staticFields.size()) {
 			return;
 		}
-		Dex.Section section = dex.openSection(offset);
-		StaticValuesParser parser = new StaticValuesParser(dex, section);
-		parser.processFields(staticFields);
-
+		for (int i = 0; i < count; i++) {
+			staticFields.get(i).addAttr(FieldInitAttr.constValue(values.get(i)));
+		}
 		// process const fields
 		root().getConstValues().processConstFields(this, staticFields);
-	}
-
-	private void parseClassSignature() {
-		SignatureParser sp = SignatureParser.fromNode(this);
-		if (sp == null) {
-			return;
-		}
-		try {
-			// parse class generic map
-			genericMap = sp.consumeGenericMap();
-			// parse super class signature
-			superClass = sp.consumeType();
-			// parse interfaces signatures
-			for (int i = 0; i < interfaces.size(); i++) {
-				ArgType type = sp.consumeType();
-				if (type != null) {
-					interfaces.set(i, type);
-				} else {
-					break;
-				}
-			}
-		} catch (JadxRuntimeException e) {
-			LOG.error("Class signature parse error: {}", this, e);
-		}
-	}
-
-	private void setFieldsTypesFromSignature() {
-		for (FieldNode field : fields) {
-			SignatureParser sp = SignatureParser.fromNode(field);
-			if (sp != null) {
-				try {
-					ArgType gType = sp.consumeType();
-					if (gType != null) {
-						field.setType(gType);
-					}
-				} catch (JadxRuntimeException e) {
-					LOG.error("Field signature parse error: {}", field, e);
-				}
-			}
-		}
 	}
 
 	private void addSourceFilenameAttr(String fileName) {
@@ -230,16 +196,72 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 				return;
 			}
 			if (fileName.contains("$")
-					&& fileName.endsWith("$" + name)) {
+					&& fileName.endsWith('$' + name)) {
 				return;
 			}
-			ClassInfo parentClass = clsInfo.getTopParentClass();
-			if (parentClass != null && fileName.equals(parentClass.getShortName())) {
+			ClassInfo parentCls = clsInfo.getTopParentClass();
+			if (parentCls != null && fileName.equals(parentCls.getShortName())) {
 				return;
 			}
 		}
 		this.addAttr(new SourceFileAttr(fileName));
-		LOG.debug("Class '{}' compiled from '{}'", this, fileName);
+	}
+
+	public void ensureProcessed() {
+		ClassNode topClass = getTopParentClass();
+		ProcessState topState = topClass.getState();
+		if (!topState.isProcessed()) {
+			throw new JadxRuntimeException("Expected class to be processed at this point,"
+					+ " class: " + topClass + ", state: " + topState);
+		}
+	}
+
+	public ICodeInfo decompile() {
+		return decompile(true);
+	}
+
+	public ICodeInfo getCode() {
+		return decompile(true);
+	}
+
+	public synchronized ICodeInfo reRunDecompile() {
+		return decompile(false);
+	}
+
+	public synchronized ICodeInfo reloadCode() {
+		unload();
+		deepUnload();
+		return decompile(false);
+	}
+
+	public void deepUnload() {
+		if (clsData == null) {
+			// manually added class
+			return;
+		}
+		clearAttributes();
+		root().getConstValues().removeForClass(this);
+		initialLoad(clsData);
+		ProcessAnonymous.runForClass(this);
+
+		for (ClassNode innerClass : innerClasses) {
+			innerClass.deepUnload();
+		}
+	}
+
+	private synchronized ICodeInfo decompile(boolean searchInCache) {
+		ICodeCache codeCache = root().getCodeCache();
+		ClassNode topParentClass = getTopParentClass();
+		String clsRawName = topParentClass.getRawName();
+		if (searchInCache) {
+			ICodeInfo code = codeCache.get(clsRawName);
+			if (code != null && code != ICodeInfo.EMPTY) {
+				return code;
+			}
+		}
+		ICodeInfo codeInfo = ProcessClass.generateCode(topParentClass);
+		codeCache.add(clsRawName, codeInfo);
+		return codeInfo;
 	}
 
 	@Override
@@ -248,23 +270,27 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 			try {
 				mth.load();
 			} catch (Exception e) {
-				LOG.error("Method load error: {}", mth, e);
-				mth.addAttr(new JadxErrorAttr(e));
+				mth.addError("Method load error", e);
 			}
 		}
 		for (ClassNode innerCls : getInnerClasses()) {
 			innerCls.load();
 		}
+		setState(LOADED);
 	}
 
 	@Override
 	public void unload() {
-		for (MethodNode mth : getMethods()) {
-			mth.unload();
+		if (state == NOT_LOADED) {
+			return;
 		}
-		for (ClassNode innerCls : getInnerClasses()) {
-			innerCls.unload();
-		}
+		methods.forEach(MethodNode::unload);
+		innerClasses.forEach(ClassNode::unload);
+		fields.forEach(FieldNode::unloadAttributes);
+		unloadAttributes();
+		setState(NOT_LOADED);
+		this.loadStage = LoadStage.NONE;
+		this.smali = null;
 	}
 
 	private void buildCache() {
@@ -283,8 +309,16 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return interfaces;
 	}
 
-	public Map<ArgType, List<ArgType>> getGenericMap() {
-		return genericMap;
+	public List<ArgType> getGenericTypeParameters() {
+		return generics;
+	}
+
+	public ArgType getType() {
+		ArgType clsType = clsInfo.getType();
+		if (Utils.notEmpty(generics)) {
+			return ArgType.generic(clsType, generics);
+		}
+		return clsType;
 	}
 
 	public List<MethodNode> getMethods() {
@@ -309,10 +343,6 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return root().getConstValues().getConstFieldByLiteralArg(this, arg);
 	}
 
-	public FieldNode searchFieldById(int id) {
-		return searchField(FieldInfo.fromDex(dex, id));
-	}
-
 	public FieldNode searchField(FieldInfo field) {
 		for (FieldNode f : fields) {
 			if (f.getFieldInfo().equals(field)) {
@@ -322,7 +352,15 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return null;
 	}
 
-	@TestOnly
+	public FieldNode searchFieldByNameAndType(FieldInfo field) {
+		for (FieldNode f : fields) {
+			if (f.getFieldInfo().equalsNameAndType(field)) {
+				return f;
+			}
+		}
+		return null;
+	}
+
 	public FieldNode searchFieldByName(String name) {
 		for (FieldNode f : fields) {
 			if (f.getName().equals(name)) {
@@ -336,7 +374,7 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return mthInfoMap.get(mth);
 	}
 
-	public MethodNode searchMethodByName(String shortId) {
+	public MethodNode searchMethodByShortId(String shortId) {
 		for (MethodNode m : methods) {
 			if (m.getMethodInfo().getShortId().equals(shortId)) {
 				return m;
@@ -345,16 +383,26 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return null;
 	}
 
-	public MethodNode searchMethodById(int id) {
-		return searchMethodByName(MethodInfo.fromDex(dex, id).getShortId());
+	/**
+	 * Return first method by original short name
+	 * Note: methods are not unique by name (class can have several methods with same name but different
+	 * signature)
+	 */
+	@Nullable
+	public MethodNode searchMethodByShortName(String name) {
+		for (MethodNode m : methods) {
+			if (m.getMethodInfo().getName().equals(name)) {
+				return m;
+			}
+		}
+		return null;
 	}
 
 	public ClassNode getParentClass() {
 		if (parentClass == null) {
 			if (clsInfo.isInner()) {
-				ClassNode parent = dex().resolveClass(clsInfo.getParentClass());
-				parent = parent == null ? this : parent;
-				parentClass = parent;
+				ClassNode parent = root.resolveClass(clsInfo.getParentClass());
+				parentClass = parent == null ? this : parent;
 			} else {
 				parentClass = this;
 			}
@@ -364,18 +412,65 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 
 	public ClassNode getTopParentClass() {
 		ClassNode parent = getParentClass();
-		return parent == this ? this : parent.getParentClass();
+		return parent == this ? this : parent.getTopParentClass();
+	}
+
+	public void visitParentClasses(Consumer<ClassNode> consumer) {
+		ClassNode currentCls = this;
+		ClassNode parentCls = currentCls.getParentClass();
+		while (parentCls != currentCls) {
+			consumer.accept(parentCls);
+			currentCls = parentCls;
+			parentCls = currentCls.getParentClass();
+		}
+	}
+
+	public boolean hasNotGeneratedParent() {
+		if (contains(AFlag.DONT_GENERATE)) {
+			return true;
+		}
+		ClassNode parent = getParentClass();
+		if (parent == this) {
+			return false;
+		}
+		return parent.hasNotGeneratedParent();
 	}
 
 	public List<ClassNode> getInnerClasses() {
 		return innerClasses;
 	}
 
+	/**
+	 * Get all inner and inlined classes recursively
+	 *
+	 * @param resultClassesSet all identified inner and inlined classes are added to this set
+	 */
+	public void getInnerAndInlinedClassesRecursive(Set<ClassNode> resultClassesSet) {
+		for (ClassNode innerCls : innerClasses) {
+			if (resultClassesSet.add(innerCls)) {
+				innerCls.getInnerAndInlinedClassesRecursive(resultClassesSet);
+			}
+		}
+		for (ClassNode inlinedCls : inlinedClasses) {
+			if (resultClassesSet.add(inlinedCls)) {
+				inlinedCls.getInnerAndInlinedClassesRecursive(resultClassesSet);
+			}
+		}
+	}
+
 	public void addInnerClass(ClassNode cls) {
 		if (innerClasses.isEmpty()) {
-			innerClasses = new ArrayList<>(3);
+			innerClasses = new ArrayList<>(5);
 		}
 		innerClasses.add(cls);
+		cls.parentClass = this;
+	}
+
+	public void addInlinedClass(ClassNode cls) {
+		if (inlinedClasses.isEmpty()) {
+			inlinedClasses = new ArrayList<>(5);
+		}
+		inlinedClasses.add(cls);
 	}
 
 	public boolean isEnum() {
@@ -385,14 +480,16 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 	}
 
 	public boolean isAnonymous() {
-		return clsInfo.isInner()
-				&& clsInfo.getAlias().getShortName().startsWith(Consts.ANONYMOUS_CLASS_PREFIX)
-				&& getDefaultConstructor() != null;
+		return contains(AFlag.ANONYMOUS_CLASS);
+	}
+
+	public boolean isInner() {
+		return parentClass != null;
 	}
 
 	@Nullable
 	public MethodNode getClassInitMth() {
-		return searchMethodByName("<clinit>()V");
+		return searchMethodByShortId("<clinit>()V");
 	}
 
 	@Nullable
@@ -405,18 +502,24 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return null;
 	}
 
+	@Override
 	public AccessInfo getAccessFlags() {
 		return accessFlags;
 	}
 
 	@Override
-	public DexNode dex() {
-		return dex;
+	public void setAccessFlags(AccessInfo accessFlags) {
+		this.accessFlags = accessFlags;
 	}
 
 	@Override
 	public RootNode root() {
-		return dex.root();
+		return root;
+	}
+
+	@Override
+	public String typeName() {
+		return "class";
 	}
 
 	public String getRawName() {
@@ -430,31 +533,42 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		return clsInfo;
 	}
 
-	/**
-	 * Class info for external usage (code generation and external api).
-	 */
-	public ClassInfo getAlias() {
-		return clsInfo.getAlias();
-	}
-
 	public String getShortName() {
-		return clsInfo.getAlias().getShortName();
+		return clsInfo.getAliasShortName();
 	}
 
 	public String getFullName() {
-		return clsInfo.getAlias().getFullName();
+		return clsInfo.getAliasFullName();
 	}
 
 	public String getPackage() {
-		return clsInfo.getAlias().getPackage();
+		return clsInfo.getAliasPkg();
 	}
 
-	public void setCode(CodeWriter code) {
-		this.code = code;
+	public String getSmali() {
+		if (smali == null) {
+			StringBuilder sb = new StringBuilder();
+			getSmali(sb);
+			sb.append(System.lineSeparator());
+			Set<ClassNode> allInlinedClasses = new LinkedHashSet<>();
+			getInnerAndInlinedClassesRecursive(allInlinedClasses);
+			for (ClassNode innerClass : allInlinedClasses) {
+				innerClass.getSmali(sb);
+				sb.append(System.lineSeparator());
+			}
+			smali = sb.toString();
+		}
+		return smali;
 	}
 
-	public CodeWriter getCode() {
-		return code;
+	protected void getSmali(StringBuilder sb) {
+		if (this.clsData == null) {
+			sb.append(String.format("###### Class %s is created by jadx", getFullName()));
+			return;
+		}
+		sb.append(String.format("###### Class %s (%s)", getFullName(), getRawName()));
+		sb.append(System.lineSeparator());
+		sb.append(this.clsData.getDisassembledCode());
 	}
 
 	public ProcessState getState() {
@@ -465,8 +579,57 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 		this.state = state;
 	}
 
-	public Set<ClassNode> getDependencies() {
+	public LoadStage getLoadStage() {
+		return loadStage;
+	}
+
+	public void startProcessStage() {
+		this.loadStage = LoadStage.PROCESS_STAGE;
+	}
+
+	public void startCodegenStage() {
+		this.loadStage = LoadStage.CODEGEN_STAGE;
+		if (contains(AFlag.RELOAD_AT_CODEGEN_STAGE)) {
+			unload();
+			remove(AFlag.RELOAD_AT_CODEGEN_STAGE);
+		}
+	}
+
+	public void reloadAtCodegenStage() {
+		ClassNode topCls = this.getTopParentClass();
+		if (topCls.getLoadStage() == LoadStage.CODEGEN_STAGE) {
+			throw new JadxRuntimeException("Class not yet loaded at codegen stage");
+		}
+		topCls.add(AFlag.RELOAD_AT_CODEGEN_STAGE);
+	}
+
+	public List<ClassNode> getDependencies() {
 		return dependencies;
+	}
+
+	public void setDependencies(List<ClassNode> dependencies) {
+		this.dependencies = dependencies;
+	}
+
+	public List<ClassNode> getUseIn() {
+		return useIn;
+	}
+
+	public void setUseIn(List<ClassNode> useIn) {
+		this.useIn = useIn;
+	}
+
+	public List<MethodNode> getUseInMth() {
+		return useInMth;
+	}
+
+	public void setUseInMth(List<MethodNode> useInMth) {
+		this.useInMth = useInMth;
+	}
+
+	@Override
+	public String getInputFileName() {
+		return clsData == null ? "synthetic" : clsData.getInputFileName();
 	}
 
 	@Override
@@ -484,11 +647,16 @@ public class ClassNode extends LineAttrNode implements ILoadable, IDexNode {
 			return clsInfo.equals(other.clsInfo);
 		}
 		return false;
+	}
 
+	@Override
+	public int compareTo(@NotNull ClassNode o) {
+		return this.getFullName().compareTo(o.getFullName());
 	}
 
 	@Override
 	public String toString() {
 		return clsInfo.getFullName();
 	}
+
 }

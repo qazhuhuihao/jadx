@@ -1,24 +1,24 @@
 package jadx.core.dex.instructions;
 
+import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.utils.InsnUtils;
-
-import com.android.dx.io.instructions.DecodedInstruction;
 
 public class ArithNode extends InsnNode {
 
 	private final ArithOp op;
 
-	public ArithNode(DecodedInstruction insn, ArithOp op, ArgType type, boolean literal) {
+	public ArithNode(InsnData insn, ArithOp op, ArgType type, boolean literal) {
 		super(InsnType.ARITH, 2);
 		this.op = op;
 		setResult(InsnArg.reg(insn, 0, type));
 
-		int rc = insn.getRegisterCount();
+		int rc = insn.getRegsCount();
 		if (literal) {
 			if (rc == 1) {
 				// self
@@ -50,9 +50,20 @@ public class ArithNode extends InsnNode {
 		addArg(b);
 	}
 
-	public ArithNode(ArithOp op, RegisterArg res, InsnArg a) {
-		this(op, res, res, a);
-		add(AFlag.ARITH_ONEARG);
+	public ArithNode(ArithOp op, InsnArg a, InsnArg b) {
+		this(op, null, a, b);
+	}
+
+	/**
+	 * Create one argument arithmetic instructions (a+=2).
+	 * Result is not set (null).
+	 *
+	 * @param res argument to change
+	 */
+	public static ArithNode oneArgOp(ArithOp op, InsnArg res, InsnArg a) {
+		ArithNode insn = new ArithNode(op, res, a);
+		insn.add(AFlag.ARITH_ONEARG);
+		return insn;
 	}
 
 	public ArithOp getOp() {
@@ -68,7 +79,29 @@ public class ArithNode extends InsnNode {
 			return false;
 		}
 		ArithNode other = (ArithNode) obj;
-		return op == other.op;
+		return op == other.op && isSameLiteral(other);
+	}
+
+	private boolean isSameLiteral(ArithNode other) {
+		InsnArg thisSecond = getArg(1);
+		InsnArg otherSecond = other.getArg(1);
+		if (thisSecond.isLiteral() != otherSecond.isLiteral()) {
+			return false;
+		}
+		if (!thisSecond.isLiteral()) {
+			// both not literals
+			return true;
+		}
+		// both literals
+		long thisLit = ((LiteralArg) thisSecond).getLiteral();
+		long otherLit = ((LiteralArg) otherSecond).getLiteral();
+		return thisLit == otherLit;
+	}
+
+	@Override
+	public InsnNode copy() {
+		ArithNode copy = new ArithNode(op, getArg(0).duplicate(), getArg(1).duplicate());
+		return copyCommonParams(copy);
 	}
 
 	@Override
@@ -76,9 +109,8 @@ public class ArithNode extends InsnNode {
 		return InsnUtils.formatOffset(offset) + ": "
 				+ InsnUtils.insnTypeToString(insnType)
 				+ getResult() + " = "
-				+ getArg(0) + " "
-				+ op.getSymbol() + " "
+				+ getArg(0) + ' '
+				+ op.getSymbol() + ' '
 				+ getArg(1);
 	}
-
 }

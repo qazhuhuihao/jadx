@@ -1,21 +1,19 @@
 package jadx.core.codegen;
 
-import jadx.api.CodePosition;
-import jadx.core.dex.attributes.nodes.LineAttrNode;
-import jadx.core.utils.files.FileUtils;
-import jadx.core.utils.files.ZipSecurity;
-
-import java.io.File;
-import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import jadx.api.CodePosition;
+import jadx.api.ICodeInfo;
+import jadx.api.impl.SimpleCodeInfo;
+import jadx.core.dex.attributes.nodes.LineAttrNode;
+import jadx.core.utils.StringUtils;
 
 public class CodeWriter {
 	private static final Logger LOG = LoggerFactory.getLogger(CodeWriter.class);
@@ -34,7 +32,7 @@ public class CodeWriter {
 			INDENT_STR + INDENT_STR + INDENT_STR + INDENT_STR + INDENT_STR,
 	};
 
-	private StringBuilder buf = new StringBuilder();
+	private StringBuilder buf;
 	@Nullable
 	private String code;
 	private String indentStr;
@@ -46,10 +44,12 @@ public class CodeWriter {
 	private Map<Integer, Integer> lineMap = Collections.emptyMap();
 
 	public CodeWriter() {
+		this.buf = new StringBuilder();
 		this.indent = 0;
 		this.indentStr = "";
 		if (ADD_LINE_NUMBERS) {
-			incIndent(2);
+			incIndent(3);
+			add(indentStr);
 		}
 	}
 
@@ -89,6 +89,17 @@ public class CodeWriter {
 		} else {
 			startLine();
 			attachSourceLine(sourceLine);
+		}
+		return this;
+	}
+
+	public CodeWriter addMultiLine(String str) {
+		if (str.contains(NL)) {
+			buf.append(str.replace(NL, NL + indentStr));
+			line += StringUtils.countMatches(str, NL);
+			offset = 0;
+		} else {
+			buf.append(str);
 		}
 		return this;
 	}
@@ -142,6 +153,7 @@ public class CodeWriter {
 		return this;
 	}
 
+	@SuppressWarnings("StringRepeatCanBeUsed")
 	private void updateIndent() {
 		int curIndent = indent;
 		if (curIndent < INDENT_CACHE.length) {
@@ -181,6 +193,11 @@ public class CodeWriter {
 		return indent;
 	}
 
+	public void setIndent(int indent) {
+		this.indent = indent;
+		updateIndent();
+	}
+
 	public int getLine() {
 		return line;
 	}
@@ -206,15 +223,15 @@ public class CodeWriter {
 		attachAnnotation(obj, new CodePosition(line, offset + 1));
 	}
 
+	public void attachLineAnnotation(Object obj) {
+		attachAnnotation(obj, new CodePosition(line, 0));
+	}
+
 	private Object attachAnnotation(Object obj, CodePosition pos) {
 		if (annotations.isEmpty()) {
 			annotations = new HashMap<>();
 		}
 		return annotations.put(pos, obj);
-	}
-
-	public Map<CodePosition, Object> getAnnotations() {
-		return annotations;
 	}
 
 	public void attachSourceLine(int sourceLine) {
@@ -231,31 +248,32 @@ public class CodeWriter {
 		lineMap.put(decompiledLine, sourceLine);
 	}
 
-	public Map<Integer, Integer> getLineMapping() {
-		return lineMap;
-	}
-
-	public void finish() {
+	public ICodeInfo finish() {
 		removeFirstEmptyLine();
-		buf.trimToSize();
+		processDefinitionAnnotations();
 		code = buf.toString();
 		buf = null;
-
-		Iterator<Map.Entry<CodePosition, Object>> it = annotations.entrySet().iterator();
-		while (it.hasNext()) {
-			Map.Entry<CodePosition, Object> entry = it.next();
-			Object v = entry.getValue();
-			if (v instanceof DefinitionWrapper) {
-				LineAttrNode l = ((DefinitionWrapper) v).getNode();
-				l.setDecompiledLine(entry.getKey().getLine());
-				it.remove();
-			}
-		}
+		return new SimpleCodeInfo(code, lineMap, annotations);
 	}
 
 	private void removeFirstEmptyLine() {
-		if (buf.indexOf(NL) == 0) {
-			buf.delete(0, NL.length());
+		int len = NL.length();
+		if (buf.length() > len && buf.substring(0, len).equals(NL)) {
+			buf.delete(0, len);
+		}
+	}
+
+	private void processDefinitionAnnotations() {
+		if (!annotations.isEmpty()) {
+			annotations.entrySet().removeIf(entry -> {
+				Object v = entry.getValue();
+				if (v instanceof DefinitionWrapper) {
+					LineAttrNode l = ((DefinitionWrapper) v).getNode();
+					l.setDecompiledLine(entry.getKey().getLine());
+					return true;
+				}
+				return false;
+			});
 		}
 	}
 
@@ -264,37 +282,14 @@ public class CodeWriter {
 	}
 
 	public String getCodeStr() {
+		if (code == null) {
+			finish();
+		}
 		return code;
 	}
 
 	@Override
 	public String toString() {
-		return buf == null ? code : buf.toString();
-	}
-
-	public void save(File dir, String subDir, String fileName) {
-		if(!ZipSecurity.isValidZipEntryName(subDir) || !ZipSecurity.isValidZipEntryName(fileName)) {
-			return;
-		}
-		save(dir, new File(subDir, fileName).getPath());
-	}
-
-	public void save(File dir, String fileName) {
-		if(!ZipSecurity.isValidZipEntryName(fileName)) {
-			return;
-		}
-		save(new File(dir, fileName));
-	}
-
-	public void save(File file) {
-		if (code == null) {
-			finish();
-		}
-		File outFile = FileUtils.prepareFile(file);
-		try (PrintWriter out = new PrintWriter(outFile, "UTF-8")) {
-			out.println(code);
-		} catch (Exception e) {
-			LOG.error("Save file error", e);
-		}
+		return code != null ? code : buf.toString();
 	}
 }

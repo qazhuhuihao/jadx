@@ -1,7 +1,14 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.FieldInitAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -14,16 +21,9 @@ import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
-import jadx.core.dex.nodes.parser.FieldInitAttr;
 import jadx.core.utils.BlockUtils;
-import jadx.core.utils.InstructionRemover;
+import jadx.core.utils.InsnRemover;
 import jadx.core.utils.exceptions.JadxException;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 
 @JadxVisitor(
 		name = "ExtractFieldInit",
@@ -35,9 +35,6 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	@Override
 	public boolean visit(ClassNode cls) throws JadxException {
-		if (cls.isEnum()) {
-			return false;
-		}
 		for (ClassNode inner : cls.getInnerClasses()) {
 			visit(inner);
 		}
@@ -51,7 +48,8 @@ public class ExtractFieldInit extends AbstractVisitor {
 		MethodNode clinit = cls.getClassInitMth();
 		if (clinit == null
 				|| !clinit.getAccessFlags().isStatic()
-				|| clinit.isNoCode()) {
+				|| clinit.isNoCode()
+				|| clinit.getBasicBlocks() == null) {
 			return;
 		}
 
@@ -65,12 +63,11 @@ public class ExtractFieldInit extends AbstractVisitor {
 	}
 
 	/**
-	 * Remove final field in place initialization if it assign in class init method
+	 * Remove a final field in place initialization if it an assign found in class init method
 	 */
 	private static void processStaticFieldAssign(ClassNode cls, IndexInsnNode insn) {
 		FieldInfo field = (FieldInfo) insn.getIndex();
-		String thisClass = cls.getClassInfo().getFullName();
-		if (field.getDeclClass().getFullName().equals(thisClass)) {
+		if (field.getDeclClass().equals(cls.getClassInfo())) {
 			FieldNode fn = cls.searchField(field);
 			if (fn != null && fn.getAccessFlags().isFinal()) {
 				fn.remove(AType.FIELD_INIT);
@@ -91,8 +88,12 @@ public class ExtractFieldInit extends AbstractVisitor {
 				List<InsnNode> initInsns = getFieldAssigns(classInitMth, field, InsnType.SPUT);
 				if (initInsns.size() == 1) {
 					InsnNode insn = initInsns.get(0);
-					if (checkInsn(insn)) {
-						InstructionRemover.remove(classInitMth, insn);
+					if (checkInsn(cls, insn)) {
+						InsnArg arg = insn.getArg(0);
+						if (arg instanceof InsnWrapArg) {
+							((InsnWrapArg) arg).getWrapInsn().add(AFlag.DECLARE_VAR);
+						}
+						InsnRemover.remove(classInitMth, insn);
 						addFieldInitAttr(classInitMth, field, insn);
 					}
 				}
@@ -132,7 +133,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 			// TODO: check not only first block
 			BlockNode blockNode = constrMth.getBasicBlocks().get(0);
 			for (InsnNode insn : blockNode.getInstructions()) {
-				if (insn.getType() == InsnType.IPUT && checkInsn(insn)) {
+				if (insn.getType() == InsnType.IPUT && checkInsn(cls, insn)) {
 					info.getPutInsns().add(insn);
 				} else if (!info.getPutInsns().isEmpty()) {
 					break;
@@ -154,7 +155,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 		Set<FieldInfo> fields = new HashSet<>();
 		for (InsnNode insn : common.getPutInsns()) {
 			FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
-			FieldNode field = cls.dex().resolveField(fieldInfo);
+			FieldNode field = cls.root().resolveField(fieldInfo);
 			if (field == null) {
 				return;
 			}
@@ -165,12 +166,16 @@ public class ExtractFieldInit extends AbstractVisitor {
 		// all checks passed
 		for (InitInfo info : infoList) {
 			for (InsnNode putInsn : info.getPutInsns()) {
-				InstructionRemover.remove(info.getConstrMth(), putInsn);
+				InsnArg arg = putInsn.getArg(0);
+				if (arg instanceof InsnWrapArg) {
+					((InsnWrapArg) arg).getWrapInsn().add(AFlag.DECLARE_VAR);
+				}
+				InsnRemover.remove(info.getConstrMth(), putInsn);
 			}
 		}
 		for (InsnNode insn : common.getPutInsns()) {
 			FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
-			FieldNode field = cls.dex().resolveField(fieldInfo);
+			FieldNode field = cls.root().resolveField(fieldInfo);
 			addFieldInitAttr(common.getConstrMth(), field, insn);
 		}
 	}
@@ -190,7 +195,22 @@ public class ExtractFieldInit extends AbstractVisitor {
 		return true;
 	}
 
-	private static boolean checkInsn(InsnNode insn) {
+	private static boolean checkInsn(ClassNode cls, InsnNode insn) {
+		if (insn instanceof IndexInsnNode) {
+			FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+			if (!fieldInfo.getDeclClass().equals(cls.getClassInfo())) {
+				// exclude fields from super classes
+				return false;
+			}
+			FieldNode fieldNode = cls.root().resolveField(fieldInfo);
+			if (fieldNode == null) {
+				// exclude inherited fields (not declared in this class)
+				return false;
+			}
+		} else {
+			return false;
+		}
+
 		InsnArg arg = insn.getArg(0);
 		if (arg.isInsnWrap()) {
 			InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
@@ -227,7 +247,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 	}
 
 	private static List<InsnNode> getFieldAssigns(MethodNode mth, FieldNode field, InsnType putInsn) {
-		if (mth.isNoCode()) {
+		if (mth.isNoCode() || mth.getBasicBlocks() == null) {
 			return Collections.emptyList();
 		}
 		List<InsnNode> assignInsns = new ArrayList<>();

@@ -1,7 +1,5 @@
 package jadx.core.export;
 
-import jadx.core.utils.exceptions.JadxRuntimeException;
-
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -16,7 +14,7 @@ import java.util.Map;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import static jadx.core.utils.files.FileUtils.close;
+import jadx.core.utils.exceptions.JadxRuntimeException;
 
 /**
  * Simple template engine
@@ -56,21 +54,15 @@ public class TemplateFile {
 	}
 
 	public String build() throws IOException {
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		try {
+		try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 			process(out);
-		} finally {
-			close(out);
+			return out.toString();
 		}
-		return out.toString();
 	}
 
 	public void save(File outFile) throws IOException {
-		OutputStream out = new FileOutputStream(outFile);
-		try {
+		try (OutputStream out = new FileOutputStream(outFile)) {
 			process(out);
-		} finally {
-			close(out);
 		}
 	}
 

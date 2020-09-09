@@ -5,10 +5,13 @@
 
 # IntelliJ Idea files
 .idea/
+.run/
 out/
 *.iml
 *.ipr
 *.iws
+.attach_pid*
+*.hprof
 
 **/.DS_Store
 
@@ -18,13 +21,15 @@ build/
 classes/
 idea/
 .gradle/
-gradle.properties
+node_modules/
 
+jadx-output/
 *-tmp/
+**/tmp/
+*.jobf
 
-*.dex
 *.class
 *.dump
 *.log
 *.cfg
-
+*.orig

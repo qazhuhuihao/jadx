@@ -1,34 +1,74 @@
 package jadx.core.dex.visitors;
 
-import jadx.api.IJadxArgs;
-import jadx.core.codegen.CodeWriter;
-import jadx.core.dex.nodes.ClassNode;
-import jadx.core.utils.exceptions.CodegenException;
-import jadx.core.utils.files.ZipSecurity;
-
 import java.io.File;
+import java.io.PrintWriter;
 
-public class SaveCode extends AbstractVisitor {
-	private final File dir;
-	private final IJadxArgs args;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-	public SaveCode(File dir, IJadxArgs args) {
-		this.args = args;
-		this.dir = dir;
+import jadx.api.ICodeInfo;
+import jadx.api.JadxArgs;
+import jadx.api.plugins.utils.ZipSecurity;
+import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.nodes.ClassNode;
+import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.files.FileUtils;
+
+public class SaveCode {
+	private static final Logger LOG = LoggerFactory.getLogger(SaveCode.class);
+
+	private SaveCode() {
 	}
 
-	@Override
-	public boolean visit(ClassNode cls) throws CodegenException {
-		save(dir, args, cls);
-		return false;
-	}
-
-	public static void save(File dir, IJadxArgs args, ClassNode cls) {
-		CodeWriter clsCode = cls.getCode();
-		String fileName = cls.getClassInfo().getFullPath() + ".java";
-  		if (args.isFallbackMode()) {
-			fileName += ".jadx";
+	public static void save(File dir, ClassNode cls, ICodeInfo code) {
+		if (cls.contains(AFlag.DONT_GENERATE)) {
+			return;
 		}
-		clsCode.save(dir, fileName);
+		if (code == null) {
+			throw new JadxRuntimeException("Code not generated for class " + cls.getFullName());
+		}
+		if (code == ICodeInfo.EMPTY) {
+			return;
+		}
+		String codeStr = code.getCodeStr();
+		if (codeStr.isEmpty()) {
+			return;
+		}
+		String fileName = cls.getClassInfo().getAliasFullPath() + getFileExtension(cls);
+		save(codeStr, dir, fileName);
+	}
+
+	public static void save(String code, File dir, String fileName) {
+		if (!ZipSecurity.isValidZipEntryName(fileName)) {
+			return;
+		}
+		save(code, new File(dir, fileName));
+	}
+
+	public static void save(ICodeInfo codeInfo, File file) {
+		save(codeInfo.getCodeStr(), file);
+	}
+
+	public static void save(String code, File file) {
+		File outFile = FileUtils.prepareFile(file);
+		try (PrintWriter out = new PrintWriter(outFile, "UTF-8")) {
+			out.println(code);
+		} catch (Exception e) {
+			LOG.error("Save file error", e);
+		}
+	}
+
+	private static String getFileExtension(ClassNode cls) {
+		JadxArgs.OutputFormatEnum outputFormat = cls.root().getArgs().getOutputFormat();
+		switch (outputFormat) {
+			case JAVA:
+				return ".java";
+
+			case JSON:
+				return ".json";
+
+			default:
+				throw new JadxRuntimeException("Unknown output format: " + outputFormat);
+		}
 	}
 }

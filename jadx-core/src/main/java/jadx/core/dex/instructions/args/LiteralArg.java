@@ -1,6 +1,7 @@
 package jadx.core.dex.instructions.args;
 
 import jadx.core.codegen.TypeGen;
+import jadx.core.utils.StringUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public final class LiteralArg extends InsnArg {
@@ -17,9 +18,10 @@ public final class LiteralArg extends InsnArg {
 			} else if (!type.isTypeKnown()
 					&& !type.contains(PrimitiveType.LONG)
 					&& !type.contains(PrimitiveType.DOUBLE)) {
-				ArgType m = ArgType.merge(null, type, ArgType.NARROW_NUMBERS);
-				if (m != null) {
-					type = m;
+				if (value != 1) {
+					type = ArgType.NARROW_NUMBERS_NO_BOOL;
+				} else {
+					type = ArgType.NARROW_NUMBERS;
 				}
 			}
 		}
@@ -46,6 +48,13 @@ public final class LiteralArg extends InsnArg {
 	}
 
 	@Override
+	public InsnArg duplicate() {
+		LiteralArg copy = new LiteralArg(literal, getType());
+		copy.type = type;
+		return copyCommonParams(copy);
+	}
+
+	@Override
 	public int hashCode() {
 		return (int) (literal ^ literal >>> 32) + 31 * getType().hashCode();
 	}
@@ -65,14 +74,14 @@ public final class LiteralArg extends InsnArg {
 	@Override
 	public String toString() {
 		try {
-			String value = TypeGen.literalToString(literal, getType());
+			String value = TypeGen.literalToString(literal, getType(), StringUtils.getInstance(), true, false);
 			if (getType().equals(ArgType.BOOLEAN) && (value.equals("true") || value.equals("false"))) {
 				return value;
 			}
-			return "(" + value + " " + type + ")";
+			return '(' + value + ' ' + type + ')';
 		} catch (JadxRuntimeException ex) {
 			// can't convert literal to string
-			return "(" + literal + " " + type + ")";
+			return "(" + literal + ' ' + type + ')';
 		}
 	}
 }

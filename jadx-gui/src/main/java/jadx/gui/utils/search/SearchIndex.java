@@ -1,16 +1,12 @@
 package jadx.gui.utils.search;
 
-import java.util.List;
+import io.reactivex.Flowable;
 
 public interface SearchIndex<V> {
 
 	void put(String str, V value);
 
-	void put(StringRef str, V value);
-
-	boolean isStringRefSupported();
-
-	List<V> getValuesForKeysContaining(String str);
+	Flowable<V> search(String searchStr, boolean caseInsensitive);
 
 	int size();
 }

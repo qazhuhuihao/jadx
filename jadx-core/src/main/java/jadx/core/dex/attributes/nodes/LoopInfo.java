@@ -1,15 +1,15 @@
 package jadx.core.dex.attributes.nodes;
 
-import jadx.core.dex.attributes.AType;
-import jadx.core.dex.nodes.BlockNode;
-import jadx.core.dex.nodes.Edge;
-import jadx.core.utils.BlockUtils;
-
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.Edge;
+import jadx.core.utils.BlockUtils;
 
 public class LoopInfo {
 
@@ -70,6 +70,10 @@ public class LoopInfo {
 			}
 		}
 		return edges;
+	}
+
+	public BlockNode getPreHeader() {
+		return BlockUtils.selectOther(end, start.getPredecessors());
 	}
 
 	public int getId() {

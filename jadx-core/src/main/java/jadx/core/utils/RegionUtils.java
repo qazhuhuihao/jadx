@@ -1,6 +1,17 @@
 package jadx.core.utils;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+
+import org.jetbrains.annotations.Nullable;
+
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.AttrList;
+import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IBlock;
@@ -8,15 +19,12 @@ import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnNode;
+import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.Region;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlock;
 import jadx.core.utils.exceptions.JadxRuntimeException;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
 
 public class RegionUtils {
 
@@ -89,20 +97,69 @@ public class RegionUtils {
 	}
 
 	/**
-	 * Return true if last block in region has no successors
+	 * Return true if last block in region has no successors or jump out insn (return or break)
 	 */
 	public static boolean hasExitBlock(IContainer container) {
+		return hasExitBlock(container, container);
+	}
+
+	private static boolean hasExitBlock(IContainer rootContainer, IContainer container) {
 		if (container instanceof BlockNode) {
-			return ((BlockNode) container).getSuccessors().isEmpty();
+			BlockNode blockNode = (BlockNode) container;
+			if (blockNode.getSuccessors().isEmpty()) {
+				return true;
+			}
+			return isInsnExitContainer(rootContainer, (IBlock) container);
+		} else if (container instanceof IBranchRegion) {
+			return false;
 		} else if (container instanceof IBlock) {
-			return true;
+			return isInsnExitContainer(rootContainer, (IBlock) container);
 		} else if (container instanceof IRegion) {
 			List<IContainer> blocks = ((IRegion) container).getSubBlocks();
 			return !blocks.isEmpty()
-					&& hasExitBlock(blocks.get(blocks.size() - 1));
+					&& hasExitBlock(rootContainer, blocks.get(blocks.size() - 1));
 		} else {
 			throw new JadxRuntimeException(unknownContainerType(container));
 		}
+	}
+
+	private static boolean isInsnExitContainer(IContainer rootContainer, IBlock block) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(block);
+		if (lastInsn == null) {
+			return false;
+		}
+		InsnType insnType = lastInsn.getType();
+		if (insnType == InsnType.RETURN) {
+			return true;
+		}
+		if (insnType == InsnType.THROW) {
+			// check if after throw execution can continue in current container
+			CatchAttr catchAttr = lastInsn.get(AType.CATCH_BLOCK);
+			if (catchAttr != null) {
+				for (ExceptionHandler handler : catchAttr.getTryBlock().getHandlers()) {
+					if (RegionUtils.isRegionContainsBlock(rootContainer, handler.getHandlerBlock())) {
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+		if (insnType == InsnType.BREAK) {
+			AttrList<LoopInfo> loopInfoAttrList = lastInsn.get(AType.LOOP);
+			if (loopInfoAttrList != null) {
+				for (LoopInfo loopInfo : loopInfoAttrList.getList()) {
+					if (!RegionUtils.isRegionContainsBlock(rootContainer, loopInfo.getStart())) {
+						return true;
+					}
+				}
+			}
+			LoopLabelAttr loopLabelAttr = lastInsn.get(AType.LOOP_LABEL);
+			if (loopLabelAttr != null
+					&& !RegionUtils.isRegionContainsBlock(rootContainer, loopLabelAttr.getLoop().getStart())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static boolean hasBreakInsn(IContainer container) {
@@ -136,9 +193,18 @@ public class RegionUtils {
 		return !notEmpty(container);
 	}
 
-	public static boolean notEmpty(IContainer container) {
+	public static boolean notEmpty(@Nullable IContainer container) {
+		if (container == null) {
+			return false;
+		}
 		if (container instanceof IBlock) {
-			return !((IBlock) container).getInstructions().isEmpty();
+			List<InsnNode> insnList = ((IBlock) container).getInstructions();
+			for (InsnNode insnNode : insnList) {
+				if (!insnNode.contains(AFlag.DONT_GENERATE)) {
+					return true;
+				}
+			}
+			return false;
 		} else if (container instanceof IRegion) {
 			IRegion region = (IRegion) container;
 			for (IContainer block : region.getSubBlocks()) {
@@ -263,6 +329,26 @@ public class RegionUtils {
 		} else {
 			throw new JadxRuntimeException(unknownContainerType(container));
 		}
+	}
+
+	/**
+	 * Check if two blocks in same region on same level
+	 * TODO: Add 'region' annotation to all blocks to speed up checks
+	 */
+	public static boolean isBlocksInSameRegion(MethodNode mth, BlockNode firstBlock, BlockNode secondBlock) {
+		Region region = mth.getRegion();
+		if (region == null) {
+			return false;
+		}
+		IContainer firstContainer = getBlockContainer(region, firstBlock);
+		if (firstContainer instanceof IRegion) {
+			if (firstContainer instanceof IBranchRegion) {
+				return false;
+			}
+			List<IContainer> subBlocks = ((IRegion) firstContainer).getSubBlocks();
+			return subBlocks.contains(secondBlock);
+		}
+		return false;
 	}
 
 	public static boolean isDominatedBy(BlockNode dom, IContainer cont) {

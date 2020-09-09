@@ -1,11 +1,12 @@
 package jadx.core.dex.attributes.nodes;
 
+import java.util.LinkedList;
+import java.util.List;
+
+import jadx.core.codegen.CodeWriter;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.IAttribute;
 import jadx.core.dex.instructions.PhiInsn;
-
-import java.util.LinkedList;
-import java.util.List;
 
 public class PhiListAttr implements IAttribute {
 
@@ -25,7 +26,10 @@ public class PhiListAttr implements IAttribute {
 		StringBuilder sb = new StringBuilder();
 		sb.append("PHI: ");
 		for (PhiInsn phiInsn : list) {
-			sb.append('r').append(phiInsn.getResult().getRegNum()).append(" ");
+			sb.append('r').append(phiInsn.getResult().getRegNum()).append(' ');
+		}
+		for (PhiInsn phiInsn : list) {
+			sb.append(CodeWriter.NL).append("  ").append(phiInsn).append(' ').append(phiInsn.getAttributesString());
 		}
 		return sb.toString();
 	}

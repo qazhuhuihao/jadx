@@ -1,20 +1,22 @@
 package jadx.core.dex.instructions.mods;
 
+import org.jetbrains.annotations.Nullable;
+
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 
-public class ConstructorInsn extends InsnNode {
+public final class ConstructorInsn extends BaseInvokeNode {
 
 	private final MethodInfo callMth;
 	private final CallType callType;
-	private final RegisterArg instanceArg;
 
-	private enum CallType {
+	public enum CallType {
 		CONSTRUCTOR, // just new instance
 		SUPER, // super call
 		THIS, // call constructor from other constructor
@@ -25,7 +27,7 @@ public class ConstructorInsn extends InsnNode {
 		super(InsnType.CONSTRUCTOR, invoke.getArgsCount() - 1);
 		this.callMth = invoke.getCallMth();
 		ClassInfo classType = callMth.getDeclClass();
-		instanceArg = (RegisterArg) invoke.getArg(0);
+		RegisterArg instanceArg = (RegisterArg) invoke.getArg(0);
 
 		if (instanceArg.isThis()) {
 			if (classType.equals(mth.getParentClass().getClassInfo())) {
@@ -45,26 +47,27 @@ public class ConstructorInsn extends InsnNode {
 			instanceArg.getSVar().setAssign(instanceArg);
 		}
 		instanceArg.getSVar().removeUse(instanceArg);
-		for (int i = 1; i < invoke.getArgsCount(); i++) {
+		int argsCount = invoke.getArgsCount();
+		for (int i = 1; i < argsCount; i++) {
 			addArg(invoke.getArg(i));
 		}
-		offset = invoke.getOffset();
-		setSourceLine(invoke.getSourceLine());
 	}
 
-	public ConstructorInsn(MethodInfo callMth, CallType callType, RegisterArg instanceArg) {
+	public ConstructorInsn(MethodInfo callMth, CallType callType) {
 		super(InsnType.CONSTRUCTOR, callMth.getArgsCount());
 		this.callMth = callMth;
 		this.callType = callType;
-		this.instanceArg = instanceArg;
 	}
 
+	@Override
 	public MethodInfo getCallMth() {
 		return callMth;
 	}
 
+	@Override
+	@Nullable
 	public RegisterArg getInstanceArg() {
-		return instanceArg;
+		return null;
 	}
 
 	public ClassInfo getClassType() {
@@ -92,6 +95,16 @@ public class ConstructorInsn extends InsnNode {
 	}
 
 	@Override
+	public boolean isStaticCall() {
+		return false;
+	}
+
+	@Override
+	public int getFirstArgOffset() {
+		return 0;
+	}
+
+	@Override
 	public boolean isSame(InsnNode obj) {
 		if (this == obj) {
 			return true;
@@ -105,7 +118,12 @@ public class ConstructorInsn extends InsnNode {
 	}
 
 	@Override
+	public InsnNode copy() {
+		return copyCommonParams(new ConstructorInsn(callMth, callType));
+	}
+
+	@Override
 	public String toString() {
-		return super.toString() + " " + callMth + " " + callType;
+		return super.toString() + " call: " + callMth + " type: " + callType;
 	}
 }

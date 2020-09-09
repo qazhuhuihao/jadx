@@ -31,14 +31,17 @@ public class PackageNode {
 	public String getFullName() {
 		if (cachedPackageFullName == null) {
 			Deque<PackageNode> pp = getParentPackages();
-
-			StringBuilder result = new StringBuilder();
-			result.append(pp.pop().getName());
-			while (!pp.isEmpty()) {
-				result.append(SEPARATOR_CHAR);
+			if (pp.isEmpty()) {
+				cachedPackageFullName = "";
+			} else {
+				StringBuilder result = new StringBuilder();
 				result.append(pp.pop().getName());
+				while (!pp.isEmpty()) {
+					result.append(SEPARATOR_CHAR);
+					result.append(pp.pop().getName());
+				}
+				cachedPackageFullName = result.toString();
 			}
-			cachedPackageFullName = result.toString();
 		}
 		return cachedPackageFullName;
 	}
@@ -56,6 +59,16 @@ public class PackageNode {
 
 	public boolean hasAlias() {
 		return packageAlias != null;
+	}
+
+	public boolean hasAnyAlias() {
+		if (hasAlias()) {
+			return true;
+		}
+		if (parentPackage != this) {
+			return parentPackage.hasAnyAlias();
+		}
+		return false;
 	}
 
 	public String getFullAlias() {
@@ -126,5 +139,10 @@ public class PackageNode {
 			parentPkg = currentPkg.getParentPackage();
 		}
 		return pp;
+	}
+
+	@Override
+	public String toString() {
+		return packageAlias;
 	}
 }

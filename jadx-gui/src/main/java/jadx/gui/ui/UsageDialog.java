@@ -1,7 +1,8 @@
 package jadx.gui.ui;
 
-import javax.swing.*;
 import java.awt.*;
+
+import javax.swing.*;
 
 import jadx.gui.treemodel.JNode;
 import jadx.gui.utils.CodeUsageInfo;
@@ -29,15 +30,17 @@ public class UsageDialog extends CommonSearchDialog {
 
 	@Override
 	protected void loadFinished() {
+		resultsTable.setEnabled(true);
 		performSearch();
 	}
 
 	@Override
 	protected void loadStart() {
-		// no op
+		resultsTable.setEnabled(false);
 	}
 
-	private synchronized void performSearch() {
+	@Override
+	protected synchronized void performSearch() {
 		resultsModel.clear();
 
 		CodeUsageInfo usageInfo = cache.getUsageInfo();
@@ -47,12 +50,12 @@ public class UsageDialog extends CommonSearchDialog {
 		resultsModel.addAll(usageInfo.getUsageList(node));
 		// TODO: highlight only needed node usage
 		highlightText = null;
-		resultsTable.updateTable();
+		super.performSearch();
 	}
 
 	private void initUI() {
 		JLabel lbl = new JLabel(NLS.str("usage_dialog.label"));
-		JLabel nodeLabel = new JLabel(this.node.makeLongString(), this.node.getIcon(), SwingConstants.LEFT);
+		JLabel nodeLabel = new JLabel(this.node.makeLongStringHtml(), this.node.getIcon(), SwingConstants.LEFT);
 		lbl.setLabelFor(nodeLabel);
 
 		JPanel searchPane = new JPanel();

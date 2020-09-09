@@ -1,21 +1,19 @@
 package jadx.core.export;
 
-import jadx.core.dex.attributes.AFlag;
-import jadx.core.dex.nodes.ClassNode;
-import jadx.core.dex.nodes.DexNode;
-import jadx.core.dex.nodes.RootNode;
-import jadx.core.utils.exceptions.JadxRuntimeException;
-import jadx.core.utils.files.FileUtils;
-
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.nodes.ClassNode;
+import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.files.FileUtils;
 
 public class ExportGradleProject {
 
@@ -23,8 +21,7 @@ public class ExportGradleProject {
 
 	private static final Set<String> IGNORE_CLS_NAMES = new HashSet<>(Arrays.asList(
 			"R",
-			"BuildConfig"
-	));
+			"BuildConfig"));
 
 	private final RootNode root;
 	private final File outDir;
@@ -40,8 +37,8 @@ public class ExportGradleProject {
 
 	public void init() {
 		try {
-			FileUtils.makeDirsForFile(srcOutDir);
-			FileUtils.makeDirsForFile(resOutDir);
+			FileUtils.makeDirs(srcOutDir);
+			FileUtils.makeDirs(resOutDir);
 			saveBuildGradle();
 			skipGeneratedClasses();
 		} catch (Exception e) {
@@ -63,14 +60,11 @@ public class ExportGradleProject {
 	}
 
 	private void skipGeneratedClasses() {
-		for (DexNode dexNode : root.getDexNodes()) {
-			List<ClassNode> classes = dexNode.getClasses();
-			for (ClassNode cls : classes) {
-				String shortName = cls.getClassInfo().getShortName();
-				if (IGNORE_CLS_NAMES.contains(shortName)) {
-					cls.add(AFlag.DONT_GENERATE);
-					LOG.debug("Skip class: {}", cls);
-				}
+		for (ClassNode cls : root.getClasses()) {
+			String shortName = cls.getClassInfo().getShortName();
+			if (IGNORE_CLS_NAMES.contains(shortName)) {
+				cls.add(AFlag.DONT_GENERATE);
+				LOG.debug("Skip class: {}", cls);
 			}
 		}
 	}

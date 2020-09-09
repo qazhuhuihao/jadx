@@ -1,11 +1,23 @@
 package jadx.core.codegen;
 
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.FieldInitAttr;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
 import jadx.core.dex.attributes.nodes.ForceReturnAttr;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
-import jadx.core.dex.instructions.SwitchNode;
+import jadx.core.dex.info.ClassInfo;
+import jadx.core.dex.instructions.SwitchInsn;
+import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.NamedArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -15,9 +27,9 @@ import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnNode;
-import jadx.core.dex.nodes.parser.FieldInitAttr;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
+import jadx.core.dex.regions.SwitchRegion.CaseInfo;
 import jadx.core.dex.regions.SynchronizedRegion;
 import jadx.core.dex.regions.TryCatchRegion;
 import jadx.core.dex.regions.conditions.IfCondition;
@@ -27,16 +39,10 @@ import jadx.core.dex.regions.loops.ForLoop;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.regions.loops.LoopType;
 import jadx.core.dex.trycatch.ExceptionHandler;
-import jadx.core.utils.ErrorsCounter;
+import jadx.core.utils.BlockUtils;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
-
-import java.util.List;
-import java.util.Map;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class RegionGen extends InsnGen {
 	private static final Logger LOG = LoggerFactory.getLogger(RegionGen.class);
@@ -73,7 +79,7 @@ public class RegionGen extends InsnGen {
 	private void declareVars(CodeWriter code, IContainer cont) {
 		DeclareVariablesAttr declVars = cont.get(AType.DECLARE_VARIABLES);
 		if (declVars != null) {
-			for (RegisterArg v : declVars.getVars()) {
+			for (CodeVar v : declVars.getVars()) {
 				code.startLine();
 				declareVar(code, v);
 				code.add(';');
@@ -95,8 +101,12 @@ public class RegionGen extends InsnGen {
 	}
 
 	private void makeSimpleBlock(IBlock block, CodeWriter code) throws CodegenException {
+		if (block.contains(AFlag.DONT_GENERATE)) {
+			return;
+		}
+
 		for (InsnNode insn : block.getInstructions()) {
-			if (!insn.contains(AFlag.SKIP)) {
+			if (!insn.contains(AFlag.DONT_GENERATE)) {
 				makeInsn(insn, code);
 			}
 		}
@@ -112,21 +122,44 @@ public class RegionGen extends InsnGen {
 		} else {
 			code.attachSourceLine(region.getSourceLine());
 		}
+		if (attachInsns) {
+			List<BlockNode> conditionBlocks = region.getConditionBlocks();
+			if (!conditionBlocks.isEmpty()) {
+				BlockNode blockNode = conditionBlocks.get(0);
+				InsnNode lastInsn = BlockUtils.getLastInsn(blockNode);
+				if (lastInsn != null) {
+					code.attachLineAnnotation(lastInsn);
+				}
+			}
+		}
+		boolean comment = region.contains(AFlag.COMMENT_OUT);
+		if (comment) {
+			code.add("// ");
+		}
+
 		code.add("if (");
 		new ConditionGen(this).add(code, region.getCondition());
 		code.add(") {");
 		makeRegionIndent(code, region.getThenRegion());
-		code.startLine('}');
+		if (comment) {
+			code.startLine("// }");
+		} else {
+			code.startLine('}');
+		}
 
 		IContainer els = region.getElseRegion();
-		if (els != null && RegionUtils.notEmpty(els)) {
+		if (RegionUtils.notEmpty(els)) {
 			code.add(" else ");
 			if (connectElseIf(code, els)) {
 				return;
 			}
 			code.add('{');
 			makeRegionIndent(code, els);
-			code.startLine('}');
+			if (comment) {
+				code.startLine("// }");
+			} else {
+				code.startLine('}');
+			}
 		}
 	}
 
@@ -134,34 +167,21 @@ public class RegionGen extends InsnGen {
 	 * Connect if-else-if block
 	 */
 	private boolean connectElseIf(CodeWriter code, IContainer els) throws CodegenException {
-		if (!els.contains(AFlag.ELSE_IF_CHAIN)) {
-			return false;
-		}
-		if (!(els instanceof Region)) {
-			return false;
-		}
-		List<IContainer> subBlocks = ((Region) els).getSubBlocks();
-		if (subBlocks.size() == 1
-				&& subBlocks.get(0) instanceof IfRegion) {
-			makeIf((IfRegion) subBlocks.get(0), code, false);
-			return true;
+		if (els.contains(AFlag.ELSE_IF_CHAIN) && els instanceof Region) {
+			List<IContainer> subBlocks = ((Region) els).getSubBlocks();
+			if (subBlocks.size() == 1) {
+				IContainer elseBlock = subBlocks.get(0);
+				if (elseBlock instanceof IfRegion) {
+					declareVars(code, elseBlock);
+					makeIf((IfRegion) elseBlock, code, false);
+					return true;
+				}
+			}
 		}
 		return false;
 	}
 
 	private CodeWriter makeLoop(LoopRegion region, CodeWriter code) throws CodegenException {
-		BlockNode header = region.getHeader();
-		if (header != null) {
-			List<InsnNode> headerInsns = header.getInstructions();
-			if (headerInsns.size() > 1) {
-				ErrorsCounter.methodError(mth, "Found not inlined instructions from loop header");
-				int last = headerInsns.size() - 1;
-				for (int i = 0; i < last; i++) {
-					InsnNode insn = headerInsns.get(i);
-					makeInsn(insn, code);
-				}
-			}
-		}
 		LoopLabelAttr labelAttr = region.getInfo().getStart().get(AType.LOOP_LABEL);
 		if (labelAttr != null) {
 			code.startLine(mgen.getNameGen().getLoopLabel(labelAttr)).add(':');
@@ -207,11 +227,13 @@ public class RegionGen extends InsnGen {
 		if (region.isConditionAtEnd()) {
 			code.startLine("do {");
 			makeRegionIndent(code, region.getBody());
-			code.startLine("} while (");
+			code.startLineWithNum(region.getConditionSourceLine());
+			code.add("} while (");
 			conditionGen.add(code, condition);
 			code.add(");");
 		} else {
-			code.startLine("while (");
+			code.startLineWithNum(region.getConditionSourceLine());
+			code.add("while (");
 			conditionGen.add(code, condition);
 			code.add(") {");
 			makeRegionIndent(code, region.getBody());
@@ -229,47 +251,54 @@ public class RegionGen extends InsnGen {
 	}
 
 	private CodeWriter makeSwitch(SwitchRegion sw, CodeWriter code) throws CodegenException {
-		SwitchNode insn = (SwitchNode) sw.getHeader().getInstructions().get(0);
+		SwitchInsn insn = (SwitchInsn) BlockUtils.getLastInsn(sw.getHeader());
+		Objects.requireNonNull(insn, "Switch insn not found in header");
 		InsnArg arg = insn.getArg(0);
 		code.startLine("switch (");
 		addArg(code, arg, false);
 		code.add(") {");
 		code.incIndent();
 
-		int size = sw.getKeys().size();
-		for (int i = 0; i < size; i++) {
-			List<Object> keys = sw.getKeys().get(i);
-			IContainer c = sw.getCases().get(i);
+		for (CaseInfo caseInfo : sw.getCases()) {
+			List<Object> keys = caseInfo.getKeys();
+			IContainer c = caseInfo.getContainer();
 			for (Object k : keys) {
-				code.startLine("case ");
-				if (k instanceof FieldNode) {
-					FieldNode fn = (FieldNode) k;
-					if (fn.getParentClass().isEnum()) {
-						code.add(fn.getAlias());
-					} else {
-						staticField(code, fn.getFieldInfo());
-						// print original value, sometimes replace with incorrect field
-						FieldInitAttr valueAttr = fn.get(AType.FIELD_INIT);
-						if (valueAttr != null && valueAttr.getValue() != null) {
-							code.add(" /*").add(valueAttr.getValue().toString()).add("*/");
-						}
-					}
-				} else if (k instanceof Integer) {
-					code.add(TypeGen.literalToString((Integer) k, arg.getType(), mth));
+				if (k == SwitchRegion.DEFAULT_CASE_KEY) {
+					code.startLine("default:");
 				} else {
-					throw new JadxRuntimeException("Unexpected key in switch: " + (k != null ? k.getClass() : null));
+					code.startLine("case ");
+					addCaseKey(code, arg, k);
+					code.add(':');
 				}
-				code.add(':');
 			}
 			makeRegionIndent(code, c);
-		}
-		if (sw.getDefaultCase() != null) {
-			code.startLine("default:");
-			makeRegionIndent(code, sw.getDefaultCase());
 		}
 		code.decIndent();
 		code.startLine('}');
 		return code;
+	}
+
+	private void addCaseKey(CodeWriter code, InsnArg arg, Object k) {
+		if (k instanceof FieldNode) {
+			FieldNode fn = (FieldNode) k;
+			if (fn.getParentClass().isEnum()) {
+				code.add(fn.getAlias());
+			} else {
+				staticField(code, fn.getFieldInfo());
+				// print original value, sometimes replaced with incorrect field
+				FieldInitAttr valueAttr = fn.get(AType.FIELD_INIT);
+				if (valueAttr != null && valueAttr.getValueType() == FieldInitAttr.InitType.CONST) {
+					Object value = valueAttr.getEncodedValue();
+					if (value != null) {
+						code.add(" /*").add(value.toString()).add("*/");
+					}
+				}
+			}
+		} else if (k instanceof Integer) {
+			code.add(TypeGen.literalToString((Integer) k, arg.getType(), mth, fallback));
+		} else {
+			throw new JadxRuntimeException("Unexpected key in switch: " + (k != null ? k.getClass() : null));
+		}
 	}
 
 	private void makeTryCatch(TryCatchRegion region, CodeWriter code) throws CodegenException {
@@ -305,17 +334,29 @@ public class RegionGen extends InsnGen {
 			return;
 		}
 		code.startLine("} catch (");
-		InsnArg arg = handler.getArg();
-		if (arg instanceof RegisterArg) {
-			declareVar(code, (RegisterArg) arg);
-		} else if (arg instanceof NamedArg) {
-			if (handler.isCatchAll()) {
-				code.add("Throwable");
-			} else {
-				useClass(code, handler.getCatchType());
+		if (handler.isCatchAll()) {
+			useClass(code, ArgType.THROWABLE);
+		} else {
+			Iterator<ClassInfo> it = handler.getCatchTypes().iterator();
+			if (it.hasNext()) {
+				useClass(code, it.next());
 			}
-			code.add(' ');
+			while (it.hasNext()) {
+				code.add(" | ");
+				useClass(code, it.next());
+			}
+		}
+		code.add(' ');
+		InsnArg arg = handler.getArg();
+		if (arg == null) {
+			code.add("unknown"); // throwing exception is too late at this point
+		} else if (arg instanceof RegisterArg) {
+			RegisterArg reg = (RegisterArg) arg;
+			code.add(mgen.getNameGen().assignArg(reg.getSVar().getCodeVar()));
+		} else if (arg instanceof NamedArg) {
 			code.add(mgen.getNameGen().assignNamedArg((NamedArg) arg));
+		} else {
+			throw new JadxRuntimeException("Unexpected arg type in catch block: " + arg + ", class: " + arg.getClass().getSimpleName());
 		}
 		code.add(") {");
 		makeRegionIndent(code, region);

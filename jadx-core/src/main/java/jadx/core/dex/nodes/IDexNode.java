@@ -2,8 +2,9 @@ package jadx.core.dex.nodes;
 
 public interface IDexNode {
 
-	DexNode dex();
+	String typeName();
 
 	RootNode root();
-}
 
+	String getInputFileName();
+}

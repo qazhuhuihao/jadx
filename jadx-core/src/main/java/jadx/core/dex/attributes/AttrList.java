@@ -1,14 +1,15 @@
 package jadx.core.dex.attributes;
 
-import jadx.core.utils.Utils;
-
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
+
+import jadx.core.codegen.CodeWriter;
+import jadx.core.utils.Utils;
 
 public class AttrList<T> implements IAttribute {
 
 	private final AType<AttrList<T>> type;
-	private final List<T> list = new LinkedList<>();
+	private final List<T> list = new ArrayList<>();
 
 	public AttrList(AType<AttrList<T>> type) {
 		this.type = type;
@@ -25,6 +26,6 @@ public class AttrList<T> implements IAttribute {
 
 	@Override
 	public String toString() {
-		return Utils.listToString(list);
+		return Utils.listToString(list, CodeWriter.NL);
 	}
 }

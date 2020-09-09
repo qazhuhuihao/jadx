@@ -1,48 +1,51 @@
 package jadx.gui.utils.search;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class SimpleIndex<T> implements SearchIndex<T> {
+import org.apache.commons.lang3.StringUtils;
 
-	private final List<String> keys = new ArrayList<>();
-	private final List<T> values = new ArrayList<>();
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
 
-	@Override
-	public void put(String str, T value) {
-		keys.add(str);
-		values.add(value);
+import jadx.api.JavaClass;
+import jadx.gui.treemodel.JNode;
+
+public class SimpleIndex {
+	private final Map<JNode, String> data = new ConcurrentHashMap<>();
+
+	public void put(String str, JNode value) {
+		data.put(value, str);
 	}
 
-	@Override
-	public void put(StringRef str, T value) {
-		throw new UnsupportedOperationException("StringRef not supported");
+	public void removeForCls(JavaClass cls) {
+		data.entrySet().removeIf(e -> e.getKey().getJavaNode().getTopParentClass().equals(cls));
 	}
 
-	@Override
-	public boolean isStringRefSupported() {
-		return false;
-	}
-
-	@Override
-	public List<T> getValuesForKeysContaining(String str) {
-		int size = size();
-		if (size == 0) {
-			return Collections.emptyList();
+	private boolean isMatched(String str, String searchStr, boolean caseInsensitive) {
+		if (caseInsensitive) {
+			return StringUtils.containsIgnoreCase(str, searchStr);
+		} else {
+			return str.contains(searchStr);
 		}
-		List<T> results = new ArrayList<>();
-		for (int i = 0; i < size; i++) {
-			String key = keys.get(i);
-			if (key.contains(str)) {
-				results.add(values.get(i));
+	}
+
+	public Flowable<JNode> search(final String searchStr, final boolean caseInsensitive) {
+		return Flowable.create(emitter -> {
+			for (Map.Entry<JNode, String> entry : data.entrySet()) {
+
+				if (isMatched(entry.getValue(), searchStr, caseInsensitive)) {
+					emitter.onNext(entry.getKey());
+				}
+				if (emitter.isCancelled()) {
+					return;
+				}
 			}
-		}
-		return results;
+			emitter.onComplete();
+		}, BackpressureStrategy.LATEST);
 	}
 
-	@Override
 	public int size() {
-		return keys.size();
+		return data.size();
 	}
 }

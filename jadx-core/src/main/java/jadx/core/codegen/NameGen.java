@@ -1,5 +1,10 @@
 package jadx.core.codegen;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 import jadx.core.Consts;
 import jadx.core.deobf.NameMapper;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
@@ -7,20 +12,19 @@ import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.NamedArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
+import jadx.core.dex.nodes.ClassNode;
+import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.utils.StringUtils;
-
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import jadx.core.utils.Utils;
 
 public class NameGen {
 
@@ -31,34 +35,51 @@ public class NameGen {
 	private final boolean fallback;
 
 	static {
-		OBJ_ALIAS = new HashMap<>();
-		OBJ_ALIAS.put(Consts.CLASS_STRING, "str");
-		OBJ_ALIAS.put(Consts.CLASS_CLASS, "cls");
-		OBJ_ALIAS.put(Consts.CLASS_THROWABLE, "th");
-		OBJ_ALIAS.put(Consts.CLASS_OBJECT, "obj");
-		OBJ_ALIAS.put("java.util.Iterator", "it");
-		OBJ_ALIAS.put("java.lang.Boolean", "bool");
-		OBJ_ALIAS.put("java.lang.Short", "sh");
-		OBJ_ALIAS.put("java.lang.Integer", "num");
-		OBJ_ALIAS.put("java.lang.Character", "ch");
-		OBJ_ALIAS.put("java.lang.Byte", "b");
-		OBJ_ALIAS.put("java.lang.Float", "f");
-		OBJ_ALIAS.put("java.lang.Long", "l");
-		OBJ_ALIAS.put("java.lang.Double", "d");
+		OBJ_ALIAS = Utils.newConstStringMap(
+				Consts.CLASS_STRING, "str",
+				Consts.CLASS_CLASS, "cls",
+				Consts.CLASS_THROWABLE, "th",
+				Consts.CLASS_OBJECT, "obj",
+				"java.util.Iterator", "it",
+				"java.lang.Boolean", "bool",
+				"java.lang.Short", "sh",
+				"java.lang.Integer", "num",
+				"java.lang.Character", "ch",
+				"java.lang.Byte", "b",
+				"java.lang.Float", "f",
+				"java.lang.Long", "l",
+				"java.lang.Double", "d",
+				"java.lang.StringBuilder", "sb",
+				"java.lang.Exception", "exc");
 	}
 
 	public NameGen(MethodNode mth, boolean fallback) {
 		this.mth = mth;
 		this.fallback = fallback;
+		addNamesUsedInClass();
 	}
 
-	public String assignArg(RegisterArg arg) {
-		String name = makeArgName(arg);
-		if (fallback) {
-			return name;
+	private void addNamesUsedInClass() {
+		ClassNode parentClass = mth.getParentClass();
+		for (FieldNode field : parentClass.getFields()) {
+			varNames.add(field.getAlias());
 		}
-		name = getUniqueVarName(name);
-		arg.setName(name);
+		for (ClassNode innerClass : parentClass.getInnerClasses()) {
+			varNames.add(innerClass.getClassInfo().getAliasShortName());
+		}
+		// add all root package names to avoid collisions with full class names
+		varNames.addAll(mth.root().getCacheStorage().getRootPkgs());
+	}
+
+	public String assignArg(CodeVar var) {
+		if (fallback) {
+			return getFallbackName(var);
+		}
+		if (var.isThis()) {
+			return RegisterArg.THIS_ARG_NAME;
+		}
+		String name = getUniqueVarName(makeArgName(var));
+		var.setName(name);
 		return name;
 	}
 
@@ -98,54 +119,60 @@ public class NameGen {
 		return r;
 	}
 
-	private String makeArgName(RegisterArg arg) {
-		if (fallback) {
-			return getFallbackName(arg);
+	private String makeArgName(CodeVar var) {
+		String name = var.getName();
+		if (name == null) {
+			name = guessName(var);
 		}
-		String name = arg.getName();
-		String varName;
-		if (name != null) {
-			if ("this".equals(name)) {
-				return name;
-			}
-			varName = name;
-		} else {
-			varName = guessName(arg);
+		if (!NameMapper.isValidAndPrintable(name)) {
+			name = getFallbackName(var);
 		}
-		if (NameMapper.isReserved(varName)) {
-			return varName + "R";
+		if (Consts.DEBUG) {
+			name += '_' + getFallbackName(var);
 		}
-		return varName;
+		return name;
+	}
+
+	private String getFallbackName(CodeVar var) {
+		List<SSAVar> ssaVars = var.getSsaVars();
+		if (ssaVars.isEmpty()) {
+			return "v";
+		}
+		return getFallbackName(ssaVars.get(0).getAssign());
 	}
 
 	private String getFallbackName(RegisterArg arg) {
 		return "r" + arg.getRegNum();
 	}
 
-	private String guessName(RegisterArg arg) {
-		SSAVar sVar = arg.getSVar();
-		if (sVar != null && sVar.getName() == null) {
-			RegisterArg assignArg = sVar.getAssign();
-			InsnNode assignInsn = assignArg.getParentInsn();
-			if (assignInsn != null) {
-				String name = makeNameFromInsn(assignInsn);
-				if (name != null && !NameMapper.isReserved(name)) {
-					assignArg.setName(name);
-					return name;
+	private String guessName(CodeVar var) {
+		List<SSAVar> ssaVars = var.getSsaVars();
+		if (ssaVars != null && !ssaVars.isEmpty()) {
+			// TODO: use all vars for better name generation
+			SSAVar ssaVar = ssaVars.get(0);
+			if (ssaVar != null && ssaVar.getName() == null) {
+				RegisterArg assignArg = ssaVar.getAssign();
+				InsnNode assignInsn = assignArg.getParentInsn();
+				if (assignInsn != null) {
+					String name = makeNameFromInsn(assignInsn);
+					if (name != null && !NameMapper.isReserved(name)) {
+						assignArg.setName(name);
+						return name;
+					}
 				}
 			}
 		}
-		return makeNameForType(arg.getType());
+		return makeNameForType(var.getType());
 	}
 
 	private String makeNameForType(ArgType type) {
 		if (type.isPrimitive()) {
 			return makeNameForPrimitive(type);
-		} else if (type.isArray()) {
-			return makeNameForType(type.getArrayRootElement()) + "Arr";
-		} else {
-			return makeNameForObject(type);
 		}
+		if (type.isArray()) {
+			return makeNameForType(type.getArrayRootElement()) + "Arr";
+		}
+		return makeNameForObject(type);
 	}
 
 	private static String makeNameForPrimitive(ArgType type) {
@@ -153,12 +180,15 @@ public class NameGen {
 	}
 
 	private String makeNameForObject(ArgType type) {
+		if (type.isGenericType()) {
+			return StringUtils.escape(type.getObject().toLowerCase());
+		}
 		if (type.isObject()) {
 			String alias = getAliasForObject(type.getObject());
 			if (alias != null) {
 				return alias;
 			}
-			ClassInfo extClsInfo = ClassInfo.extCls(mth.dex(), type);
+			ClassInfo extClsInfo = ClassInfo.fromType(mth.root(), type);
 			String shortName = extClsInfo.getShortName();
 			String vName = fromName(shortName);
 			if (vName != null) {
@@ -231,15 +261,18 @@ public class NameGen {
 		if (name.startsWith("get") || name.startsWith("set")) {
 			return fromName(name.substring(3));
 		}
-		ArgType declType = callMth.getDeclClass().getAlias().getType();
 		if ("iterator".equals(name)) {
 			return "it";
 		}
+		ArgType declType = callMth.getDeclClass().getType();
 		if ("toString".equals(name)) {
 			return makeNameForType(declType);
 		}
 		if ("forName".equals(name) && declType.equals(ArgType.CLASS)) {
 			return OBJ_ALIAS.get(Consts.CLASS_CLASS);
+		}
+		if (name.startsWith("to")) {
+			return fromName(name.substring(2));
 		}
 		return name;
 	}
